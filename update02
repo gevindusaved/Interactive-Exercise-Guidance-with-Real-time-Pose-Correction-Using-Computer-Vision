@@ -1,0 +1,198 @@
+import signal
+import cv2
+import numpy as np
+import mediapipe as mp
+
+class poseDetector:
+    def __init__(self, smoother, static_image_mode=False, model_complexity=2, smooth_landmarks=True,
+                 enable_segmentation=False, smooth_segmentation=True,
+                 min_detection_confidence=0.5, min_tracking_confidence=0.5):
+        self.mpDraw = mp.solutions.drawing_utils
+        self.mpPose = mp.solutions.pose
+        self.pose = self.mpPose.Pose(
+            static_image_mode=static_image_mode,
+            model_complexity=model_complexity,
+            smooth_landmarks=smooth_landmarks,
+            enable_segmentation=enable_segmentation,
+            smooth_segmentation=smooth_segmentation,
+            min_detection_confidence=min_detection_confidence,
+            min_tracking_confidence=min_tracking_confidence,
+        )
+        self.smoother = smoother  # Store smoother instance
+
+    def findPose(self, img, draw=True):
+        try:
+            # Convert the image to RGB as required by MediaPipe
+            imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            # Process the image to detect pose landmarks
+            self.results = self.pose.process(imgRGB)
+            # If landmarks are detected and drawing is enabled, draw them
+            if self.results.pose_landmarks and draw:
+                self.mpDraw.draw_landmarks(img, self.results.pose_landmarks,
+                                           self.mpPose.POSE_CONNECTIONS)
+        except Exception as e:
+            print(f"Error in findPose: {e}")  # Handle exceptions gracefully
+        return img  # Return the image with/without landmarks drawn
+
+    def findPosition(self, img, draw=True):
+        lmList = []
+        try:
+            if self.results.pose_landmarks:
+                for id, lm in enumerate(self.results.pose_landmarks.landmark):
+                    h, w, c = img.shape
+                    cx, cy = int(lm.x * w), int(lm.y * h)
+                    
+                    # Apply smoothing using the instance attribute
+                    cx_smooth = int(self.smoother.smooth(f"{id}_x", cx))
+                    cy_smooth = int(self.smoother.smooth(f"{id}_y", cy))
+                    
+                    lmList.append([id, cx_smooth, cy_smooth])
+                    
+                    if draw:
+                        cv2.circle(img, (cx_smooth, cy_smooth), 5, (255, 0, 0), cv2.FILLED)
+        except Exception as e:
+            print(f"Error in findPosition: {e}")
+        return lmList
+
+    def calculate_angle(self, a, b, c, draw=True):
+        # Convert points to NumPy arrays for vector math
+        a = np.array(a)  # First point
+        b = np.array(b)  # Middle point
+        c = np.array(c)  # End point
+
+        # Calculate the angle using arctan of vector slopes
+        radians = np.arctan2(c[1] - b[1], c[0] - b[0]) - np.arctan2(a[1] - b[1], a[0] - b[0])
+        angle = np.abs(radians * 180.0 / np.pi)  # Convert radians to degrees
+
+        if angle > 180.0:  # Normalize angle to the range [0, 180]
+            angle = 360.0 - angle
+
+        return angle  # Return the calculated angle
+class Smoother:
+    def __init__(self, alpha=0.5):
+        self.alpha = alpha
+        self.prev_values = {}
+
+    def smooth(self, key, new_value):
+        if key not in self.prev_values:
+            self.prev_values[key] = new_value
+        else:
+            self.prev_values[key] = self.alpha * new_value + (1 - self.alpha) * self.prev_values[key]
+        return self.prev_values[key]
+
+def main():
+    cap = cv2.VideoCapture(0)  # Open the video file "8401288-hd_1080_1920_30fps.mp4"
+    smoother = Smoother(alpha=0.3)
+    detector = poseDetector(smoother)  # Pass smoother instance
+    running = True  # Variable to control the main loop
+    
+
+    def signal_handler(sig, frame):
+        nonlocal running
+        print("Kill switch activated! Exiting gracefully...")
+        running = False  # Stop the loop when Ctrl+C is pressed
+
+    # Register the signal handler for SIGINT (Ctrl+C)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    counter = 0  # Counter for repetitions
+    left_stage = None  # State of the left arm
+    right_stage = None  # State of the right arm
+
+    # Desired width and height for resizing frames
+    desired_width = 1700
+    
+
+    if not cap.isOpened():
+        print("Error: Unable to open the video file.")  # Error message if video isn't accessible
+        return
+    
+    # Use the MediaPipe pose context
+    with mp.solutions.pose.Pose(min_detection_confidence=0.7, min_tracking_confidence=0.7) as pose:
+        while running and cap.isOpened():  # Main loop
+            success, frame = cap.read()  # Read a frame from the video
+
+            if not success or frame is None:
+                print("End of video or failed to read frame.")  # Stop if reading fails
+                break
+
+            # Resize frame for consistent processing
+            h, w = frame.shape[:2]
+            aspect_ratio = w / h
+            new_width = 700
+            new_height = int(new_width / aspect_ratio)
+            frame = cv2.resize(frame, (new_width, new_height))
+
+            img = detector.findPose(frame, draw=True)  # Detect pose in the frame
+            lmList = detector.findPosition(img, draw=False)  # Get landmark positions
+
+            if lmList:  # If landmarks are detected
+                # Extract coordinates for key points of left and right arms
+                #left_shoulder = (lmList[mpPose.PoseLandmark.LEFT_SHOULDER.value][1:4])  # Include z-axis
+
+                left_shoulder = lmList[mp.solutions.pose.PoseLandmark.LEFT_SHOULDER.value][1:4]
+                left_hip = lmList[mp.solutions.pose.PoseLandmark.LEFT_HIP.value][1:4]
+                left_elbow = lmList[mp.solutions.pose.PoseLandmark.LEFT_ELBOW.value][1:4]
+                left_wrist = lmList[mp.solutions.pose.PoseLandmark.LEFT_WRIST.value][1:4]
+            
+                right_shoulder = lmList[mp.solutions.pose.PoseLandmark.RIGHT_SHOULDER.value][1:4]
+                right_hip = lmList[mp.solutions.pose.PoseLandmark.RIGHT_HIP.value][1:4]
+                right_elbow = lmList[mp.solutions.pose.PoseLandmark.RIGHT_ELBOW.value][1:4]
+                right_wrist = lmList[mp.solutions.pose.PoseLandmark.RIGHT_WRIST.value][1:4]
+            
+                # Calculate angles for both arms
+                left_angle_raw = detector.calculate_angle(left_shoulder, left_elbow, left_wrist)
+                left_angle = smoother.smooth("left_angle", left_angle_raw)  # Apply smoothing
+                
+                right_angle_raw = detector.calculate_angle(right_shoulder, right_elbow, right_wrist)
+                right_angle = smoother.smooth("right_angle", right_angle_raw)  # Apply smoothing
+
+
+                horizon_angle_right = detector.calculate_angle(right_hip, right_shoulder, right_elbow)
+                horizon_angle_left = detector.calculate_angle(left_hip, left_shoulder, left_elbow)
+                print(f"right angle: {horizon_angle_right}")
+                print(f"left angle: {horizon_angle_left}")
+                
+                #print(f"right angle: {right_angle_raw}")
+                #print(f"right angle2: {right_angle}")
+                # Display angles near the elbows
+                cv2.putText(img, f"{int(left_angle)}", (left_elbow[0] - 20, left_elbow[1] - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2, cv2.LINE_AA)
+                cv2.putText(img, f"{int(right_angle)}", (right_elbow[0] - 20, right_elbow[1] - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2, cv2.LINE_AA)
+                cv2.putText(img, f"{int(horizon_angle_left)}", (right_shoulder[0] - 20, right_shoulder[1] - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2, cv2.LINE_AA)
+                cv2.putText(img, f"{int(horizon_angle_right)}", (left_shoulder[0] - 20, left_shoulder[1] - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2, cv2.LINE_AA)
+                if horizon_angle_right< 20:
+                    # Logic to count repetitions for left arm
+                    if left_angle_raw > 160:  # Arm is down
+                        left_stage = "down"
+                    if left_angle_raw < 30 and left_stage == 'down':  # Arm moved up
+                        left_stage = "up"
+                        counter += 1  # Increment counter
+                        print(f"Left: {counter}")  # Debugging print
+                if horizon_angle_left< 20:
+                    # Logic to count repetitions for right arm
+                    if right_angle_raw > 160:  # Arm is down
+                        right_stage = "down"
+                    if right_angle_raw < 30 and right_stage == 'down':  # Arm moved up
+                        right_stage = "up"
+                        counter += 1  # Increment counter
+                        print(f"Right: {counter}")  # Debugging print
+                
+            # Display repetition count on the screen
+            cv2.putText(img, f"Reps: {counter}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX,
+                        1, (255, 0, 0), 2, cv2.LINE_AA)
+            
+            # Display the frame with landmarks and info
+            cv2.imshow("Pose Detection", img)
+
+            if cv2.waitKey(10) & 0xFF == ord('q'):  # Quit if 'q' is pressed
+                break
+
+    cap.release()  # Release the webcam
+    cv2.destroyAllWindows()  # Close all OpenCV windows
+
+if __name__ == "__main__":
+    main()  # Entry point of the script
